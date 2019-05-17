@@ -1,0 +1,40 @@
+---
+title: "Locate CPTAC MAF cases"
+output: html_notebook
+---
+
+```{r, message=FALSE}
+library(tidyverse)
+```
+
+```{r}
+CPTAC_MAF_MANIFEST_PTH = '../external_data/cptac3_ensemble_masked_maf.tsv'
+SAMPLE_ATTRIBUTE_CSV_PTH = '../external_data/Batch1through8_sample_attributes.csv.gz'
+```
+
+```{r}
+cptac_maf_manifest_tbl <- read_tsv(
+    CPTAC_MAF_MANIFEST_PTH, 
+    col_types = cols(.default = col_character()))
+sample_attribute_tbl <- read_csv(
+    SAMPLE_ATTRIBUTE_CSV_PTH,
+    col_types = cols(.default = col_character())
+)
+```
+
+```{r}
+merged_maf_manifest <- cptac_maf_manifest_tbl %>%
+    select(maf_filename, aliquot_submitter_id) %>%
+    left_join(sample_attribute_tbl, by = c(aliquot_submitter_id = 'SAMPLE_ID'))
+```
+
+```{r}
+merged_maf_manifest %>%
+    count(BODY_SITE)
+```
+
+```{r}
+merged_maf_manifest %>%
+    write_tsv('../processed_data/merged_maf_manifest.tsv.gz')
+```
+
