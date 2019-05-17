@@ -35,6 +35,6 @@ merged_maf_manifest %>%
 
 ```{r}
 merged_maf_manifest %>%
-    write_tsv('../processed_data/merged_maf_manifest.tsv.gz')
+    write_tsv('../tracked_results/merged_maf_manifest.tsv.gz')
 ```
 

@@ -40,3 +40,8 @@ The repository requires the following files:
         external_data/disease_wg/luad_hg38_all_samples.song_wip.maf \
         external_data/disease_wg/ucec_hg38_all_samples.maf \
         external_data/disease_wg/ccrcc_hg38/*.maf
+
+    python3 scripts/add_gdc_ensemble_maf_to_db.py \
+        processed_data/all_mutations.sqlite \
+        gdc \
+        tracked_results/merged_maf_manifest.tsv.gz
