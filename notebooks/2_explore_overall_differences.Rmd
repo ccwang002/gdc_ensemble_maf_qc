@@ -1,0 +1,253 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r, message=FALSE}
+library(DBI)
+library(RSQLite)
+library(SummarizedExperiment)
+library(ensembldb)
+library(tidyverse)
+library(ggrepel)
+```
+
+```{r}
+MUTATION_DB_PTH <- '../processed_data/all_mutations.sqlite'
+MANIFEST_PTH <- '../tracked_results/merged_maf_manifest.tsv.gz'
+```
+
+```{r}
+manifest_tbl <- read_tsv(MANIFEST_PTH)
+```
+
+
+```{r}
+conn = DBI::dbConnect(
+    RSQLite::SQLite(), 
+    dbname=MUTATION_DB_PTH,
+    cache_size = -4000000,  # Use 4GB of RAM to cache the database
+    flags = RSQLite::SQLITE_RO  # Read only
+)
+dbListTables(conn)
+```
+
+```{r}
+dwg_samples = dbGetQuery(conn, 'SELECT DISTINCT sample FROM disease_wg') %>% pull(sample)
+gdc_samples = dbGetQuery(conn, 'SELECT DISTINCT sample FROM gdc') %>% pull(sample)
+```
+
+```{r}
+gdc_dup_maf_tbl <- manifest_tbl %>%
+    group_by(SUBJECT_ID) %>%
+    filter(n() > 1) %>%
+    select(BODY_SITE, SUBJECT_ID, aliquot_submitter_id, maf_filename) %>%
+    arrange(BODY_SITE, SUBJECT_ID, aliquot_submitter_id)
+
+gdc_dup_maf_tbl
+```
+
+
+```{r}
+sample_tbl <- manifest_tbl %>%
+    transmute(
+        sample = SUBJECT_ID, 
+        cancer_type = case_when(
+            BODY_SITE == 'Kidney' ~ 'CCRCC',
+            BODY_SITE == 'Lung' ~ 'LUAD',
+            BODY_SITE == 'Uterus Endometrium' ~ 'UCEC'
+        ),
+        has_gdc_maf = sample %in% gdc_samples,
+        has_dwg_maf = sample %in% dwg_samples,
+        is_gdc_dup = sample %in% gdc_dup_maf_tbl$SUBJECT_ID
+    )
+
+sample_tbl %>% head()
+```
+
+```{r}
+sample_tbl %>%
+    count(cancer_type, is_gdc_dup, has_gdc_maf, has_dwg_maf)
+```
+
+```{r}
+sample_tbl.shared = sample_tbl %>% 
+    filter(
+        !is_gdc_dup,
+        has_gdc_maf, 
+        has_dwg_maf
+    )
+
+sample_tbl.shared %>% count(cancer_type)
+```
+
+
+```{r}
+overlap_tbl <- dbReadTable(conn, 'overlap') %>%
+    as_tibble()
+```
+
+
+```{r}
+overlap_tbl %>% head()
+```
+
+```{r}
+summarize_overlap_stat <- function(tbl) {
+    tbl %>%
+    group_by(sample) %>%
+    summarize(num_shared = sum(shared), 
+              num_only_in_dwg = sum(only_in_dwg), 
+              num_only_in_gdc = sum(only_in_gdc)) %>% 
+    left_join(
+        sample_tbl.shared %>% select(sample, cancer_type), 
+        by = 'sample'
+    ) %>%
+    mutate(
+        percent_shared_in_dwg = num_shared / (num_shared + num_only_in_dwg),
+        percent_shared_in_gdc = num_shared / (num_shared + num_only_in_gdc),
+        num_total = num_shared + num_only_in_dwg + num_only_in_gdc
+    )
+}
+
+overlap_stat <- overlap_tbl %>% summarize_overlap_stat()
+
+overlap_stat
+```
+
+
+```{r}
+overlap_stat %>%
+    summarize(sum(num_shared), sum(num_only_in_dwg), sum(num_only_in_gdc))
+```
+
+
+```{r}
+overlap_stat %>%
+    summarize(shared_calls_percent = sum(num_shared) / sum(num_shared + num_only_in_dwg + num_only_in_gdc))
+```
+
+
+## Overlap per sample
+```{r, fig.width=10, fig.height=4}
+ggplot(overlap_stat, 
+       aes(x = percent_shared_in_gdc, y = percent_shared_in_dwg, size = num_total, label = sample)) + 
+    geom_point(alpha=0.5) +
+    geom_text_repel(
+        data = overlap_stat %>% filter(
+            percent_shared_in_dwg < 0.5 
+            | percent_shared_in_gdc < 0.4
+        ),
+        size = 3
+    ) + 
+    scale_x_continuous(
+        name = "GDC shared calls", 
+        labels = scales::percent,
+        limits = c(0, 1)
+    ) +
+    scale_y_continuous(
+        name = "DWG shared calls", 
+        labels = scales::percent,
+        limits = c(0, 1)
+    ) + 
+    coord_fixed(ratio = 1) +
+    scale_size(
+        name = 'Total calls',
+        range = c(1, 6), 
+        breaks = c(10, 100, 1000, 10000), 
+        trans = 'sqrt'
+    ) +
+    facet_wrap(~ cancer_type, nrow = 1) +
+    theme_bw() +
+    theme(
+        legend.position = 'bottom'
+    )
+ggsave(
+    '~/Box/Ding_Lab/Projects_Current/CPTAC3-Pediatric Brain Tumor/Figures/201905_somatic_cnv/overlap_per_sample.pdf',
+    width = 10,
+    height = 4.5
+)
+```
+
+
+## Overlap per VAF
+
+```{r}
+overlap_tbl.with_vaf <- dbGetQuery(
+    conn,
+    'WITH d AS (
+        SELECT 
+            id AS dwg_id, 
+            symbol AS dwg_symbol,
+            CAST (n_alt_count AS float) / n_depth AS dwg_normal_vaf, 
+            CAST (t_alt_count AS float) / t_depth AS dwg_tumor_vaf 
+        FROM disease_wg
+    ), g AS (
+        SELECT 
+            id AS gdc_id, 
+            symbol AS gdc_symbol,
+            CAST (n_alt_count AS float) / n_depth AS gdc_normal_vaf, 
+            CAST (t_alt_count AS float) / t_depth AS gdc_tumor_vaf 
+        FROM gdc
+    )
+    SELECT * 
+    FROM overlap o
+    LEFT JOIN d USING (dwg_id)
+    LEFT JOIN g USING (gdc_id)
+    '
+) %>% as_tibble()
+```
+
+
+```{r, fig.width=10, fig.height=4.5}
+plot_tbl <- overlap_tbl.with_vaf %>%
+    filter(
+        (only_in_dwg == 1 & dwg_tumor_vaf >= 0.1) | gdc_tumor_vaf >= 0.1
+    ) %>%
+    summarize_overlap_stat()
+
+ggplot(plot_tbl, 
+       aes(x = percent_shared_in_gdc, y = percent_shared_in_dwg, size = num_total, label = sample)) + 
+    geom_point(alpha=0.5) +
+    scale_x_continuous(
+        name = "GDC shared calls", 
+        labels = scales::percent,
+        limits = c(0, 1)
+    ) +
+    scale_y_continuous(
+        name = "DWG shared calls", 
+        labels = scales::percent,
+        limits = c(0, 1)
+    ) + 
+    coord_fixed(ratio = 1) +
+    scale_size(
+        name = 'Total calls',
+        range = c(1, 6), 
+        breaks = c(10, 100, 1000), 
+        trans = 'sqrt'
+    ) +
+    facet_wrap(~ cancer_type, nrow = 1) +
+    theme_bw() +
+    theme(
+        legend.position = 'bottom'
+    )
+
+ggsave(
+    '~/Box/Ding_Lab/Projects_Current/CPTAC3-Pediatric Brain Tumor/Figures/201905_somatic_cnv/overlap_per_sample.vaf10_cutoff.pdf',
+    width = 10,
+    height = 4.5
+)
+```
+
+
+```{r}
+overlap_tbl.with_vaf %>%
+    filter(sample == 'C3L-00083')
+
+overlap_tbl.with_vaf %>%
+    filter(sample == 'C3L-01683')
+
+overlap_tbl.with_vaf %>%
+    filter(sample == 'C3L-01253')
+```
+
